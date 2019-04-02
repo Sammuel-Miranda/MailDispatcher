@@ -76,11 +76,10 @@ namespace Dispatcher
                 var ch = s[i];
                 if (ch == '"')
                 {
-                    if (i + 1 < s.Length && s[i + 1] == '"')
+                    if ((i + 1) < s.Length && s[i + 1] == '"')
                     {
                         col.Append('"');
-                        i++;
-                        i++;
+                        i += 2;
                         continue;
                     }
                     i++;
@@ -887,13 +886,14 @@ namespace Dispatcher
         }
     }
 
-    public sealed class Mailer
+    public sealed class Config
     {
         public string SenderUser { get; set; }
         public string SenderPass { get; set; }
         public string SenderHost { get; set; }
         public int SenderPort { get; set; }
         public int SendInterval { get; set; }
+        public char FileSeparator { get; set; }
 
         public static string ConfigPath()
         {
@@ -908,7 +908,7 @@ namespace Dispatcher
 
         private string ConfigFile()
         {
-            string Path = global::Dispatcher.Mailer.ConfigPath();
+            string Path = global::Dispatcher.Config.ConfigPath();
             if (string.IsNullOrEmpty(Path)) { return string.Empty; }
             else
             {
@@ -926,15 +926,16 @@ namespace Dispatcher
             return cli;
         }
 
-        public global::System.Net.Mail.SmtpClient NewClient() { return global::Dispatcher.Mailer.NewClient(this.SenderHost, this.SenderUser, this.SenderPass, this.SenderPort); }
+        public global::System.Net.Mail.SmtpClient NewClient() { return global::Dispatcher.Config.NewClient(this.SenderHost, this.SenderUser, this.SenderPass, this.SenderPort); }
 
-        public void Initialize(string Host, string User, string Pass, int Port, int Interval)
+        public void Initialize(string Host, string User, string Pass, int Port, int Interval, char Separator)
         {
             this.SenderHost = Host;
             this.SenderUser = User;
             this.SenderPass = Pass;
             this.SenderPort = Port;
             this.SendInterval = Interval;
+            this.FileSeparator = Separator;
         }
 
         public void Save()
@@ -943,7 +944,8 @@ namespace Dispatcher
             Tx += this.SenderUser + global::System.Environment.NewLine;
             Tx += this.SenderPass + global::System.Environment.NewLine;
             Tx += this.SenderPort.ToString() + global::System.Environment.NewLine;
-            Tx += this.SendInterval.ToString();
+            Tx += this.SendInterval.ToString() + global::System.Environment.NewLine;
+            Tx += this.FileSeparator;
             global::System.IO.File.WriteAllText(this.ConfigFile(), Tx);
         }
 
@@ -970,6 +972,10 @@ namespace Dispatcher
             intvPick.Value = intvPick.MinDate.AddTicks(min.Ticks);
             intvPick.MaxDate = intvPick.MinDate.Add(new global::System.TimeSpan(23, 59, 59));
             intvPick.ShowUpDown = true;
+            Y += (22 + 3);
+            global::System.Windows.Forms.TextBox csvSep = Frm.InitField("csvSep", "Separador das Colunas do Arquivo (CSV)", ref Y, false, LabelBackColor: default(global::System.Drawing.Color));
+            csvSep.MaxLength = 1;
+            csvSep.Text = string.Empty + this.FileSeparator;
             global::System.EventHandler acceptMethod = new global::System.EventHandler((sender, e) => 
             {
                 if (string.IsNullOrEmpty(smtpHost.Text)) { global::Dispatcher.Notifier.ShowDialog("Campo \"Host\" Inválido!", "Valor Inválido", global::Dispatcher.Form.Type.ERROR); }
@@ -982,6 +988,7 @@ namespace Dispatcher
                     this.SenderPort = (int)smtpPort.Value;
                     this.SenderUser = smtpUser.Text;
                     this.SenderPass = smtpPass.Text;
+                    if (string.IsNullOrEmpty(csvSep.Text)) { this.FileSeparator = ';'; } else { this.FileSeparator = csvSep.Text[0]; }
                     if (intvPick.Value.TimeOfDay < min) { this.SendInterval = (int)((new global::System.TimeSpan(0, 1, 0)).TotalMilliseconds); } else { this.SendInterval = (int)((intvPick.Value.TimeOfDay).TotalMilliseconds); }
                     this.Save();
                     Frm.Close();
@@ -998,14 +1005,14 @@ namespace Dispatcher
             {
                 string[] L = global::System.IO.File.ReadAllLines(AUX);
                 AUX = string.Empty;
-                if (L != null && L.Length == 5) { this.Initialize(L[0], L[1], L[2], int.Parse(L[3]), int.Parse(L[4])); } else if (QueryTheUser) { this.QueryUser(); }
+                if (L != null && L.Length == 6) { this.Initialize(L[0], L[1], L[2], int.Parse(L[3]), int.Parse(L[4]), (L[5])[0]); } else if (QueryTheUser) { this.QueryUser(); }
             } else if (QueryTheUser) { this.QueryUser(); }
         }
 
-        public Mailer(string Host, string User, string Pass, int Port, int Interval) { this.Initialize(Host, User, Pass, Port, Interval); }
-        public Mailer() { this.Initialize(true); }
+        public Config(string Host, string User, string Pass, int Port, int Interval, char Separator) { this.Initialize(Host, User, Pass, Port, Interval, Separator); }
+        public Config() { this.Initialize(true); }
 
-        public Mailer(bool QueryTheUser)
+        public Config(bool QueryTheUser)
         {
             this.SendInterval = (int)((new global::System.TimeSpan(0, 1, 0)).TotalMilliseconds);
             this.Initialize(false);
@@ -1016,6 +1023,8 @@ namespace Dispatcher
     public sealed class Worker : global::System.IDisposable
     {
         public delegate void WorkerHandler(global::Dispatcher.Worker worker);
+        public delegate void OnEnd();
+        public delegate void OnNotify(string Message);
 
         public interface IOwner
         {
@@ -1024,19 +1033,17 @@ namespace Dispatcher
             event global::Dispatcher.Worker.WorkerHandler AbortWorker;
         }
 
-        public global::Dispatcher.Mailer Mailer { get; private set; }
+        public global::Dispatcher.Config Config { get; private set; }
         private bool AbortCalled;
         private global::Dispatcher.Worker.IOwner Owner;
         private global::System.Net.Mail.SmtpClient Client;
         private global::System.IO.StreamReader File;
         private global::System.Threading.Thread Thread;
-        private char sep;
         public bool IsOpen { get { return (this.File != null); } }
         public bool IsWorking { get { return (this.Thread != null); } }
         public int CurrentLine { get; private set; }
         public int ValidLines { get; private set; }
         public int SourceLines { get; private set; }
-        public char Separator { get { return this.sep; } set { if (!this.IsOpen) { this.sep = value; } } }
         private void NoForm() { global::Dispatcher.Notifier.ShowDialog("Form Não Definido!", "Erro", global::Dispatcher.Form.Type.ERROR); }
         private void AbortListener(global::Dispatcher.Worker worker) { this.Abort = true; }
 
@@ -1067,7 +1074,7 @@ namespace Dispatcher
         void global::System.IDisposable.Dispose()
         {
             this.Owner = null;
-            this.Mailer = null;
+            this.Config = null;
             this.Close();
         }
 
@@ -1096,41 +1103,53 @@ namespace Dispatcher
                 else if (!global::System.IO.File.Exists(FilePath)) { global::Dispatcher.Notifier.ShowDialog("Arquivo Não Existe!", "Erro", global::Dispatcher.Form.Type.ERROR); }
                 else
                 {
-                    string JobPath = (global::Dispatcher.Mailer.ConfigPath() + "work.csv");
+                    global::System.Collections.Generic.List<global::Dispatcher.CSV.Record> recordsOFfile = global::Dispatcher.CSV.ParseFile(FilePath, ';');
+                    string JobPath = (global::Dispatcher.Config.ConfigPath() + "work.csv");
                     using (global::System.IO.TextWriter writer = new global::System.IO.StreamWriter(JobPath, false))
-                    using (global::System.IO.TextReader reader = new global::System.IO.StreamReader(FilePath))
                     {
-                        FilePath = reader.ReadLine(); //REUSE
                         string[] aux = null;
-                        global::System.Text.StringBuilder b = new global::System.Text.StringBuilder(); //AUX
-                        global::System.Collections.Generic.List<string> row = new global::System.Collections.Generic.List<string>(7);
-                        while (FilePath != null && FilePath != string.Empty)
+                        foreach (global::Dispatcher.CSV.Record rec in recordsOFfile)
                         {
-                            if (global::Dispatcher.CSV.Tokenize(FilePath, this.Separator, b, row) && row.Count == 7)
+                            if (rec.Row.Length > 5)
                             {
+                                bool Fail = false;
                                 try //"To" argument
                                 {
-                                    row[0] = row[0].ToLower();
-                                    aux = row[0].Split(new char[] { ';' }, global::System.StringSplitOptions.RemoveEmptyEntries); //Mail split - is always ";"
-                                    foreach (string arg in aux) { if (!arg.Contains("@") && arg.StartsWith("@") && arg.EndsWith("@")) { continue; } }
+                                    rec.Row[0] = rec.Row[0].ToLower();
+                                    aux = rec.Row[0].Split(new char[] { ';' }, global::System.StringSplitOptions.RemoveEmptyEntries); //Mail split - is always ";"
+                                    foreach (string arg in aux) { if (!arg.Contains("@") || arg.StartsWith("@") || arg.EndsWith("@")) { Fail = true; } }
+                                    if (Fail)
+                                    {
+                                        this.SourceLines++;
+                                        continue;
+                                    }
                                 } catch { continue; }
                                 try //"Cc" argument
                                 {
-                                    row[1] = row[1].ToLower();
-                                    aux = row[1].Split(new char[] { ';' }, global::System.StringSplitOptions.RemoveEmptyEntries); //Mail split - is always ";"
-                                    foreach (string arg in aux) { if (!arg.Contains("@") && arg.StartsWith("@") && arg.EndsWith("@")) { continue; } }
+                                    Fail = false;
+                                    rec.Row[1] = rec.Row[1].ToLower();
+                                    aux = rec.Row[1].Split(new char[] { ';' }, global::System.StringSplitOptions.RemoveEmptyEntries); //Mail split - is always ";"
+                                    foreach (string arg in aux) { if (!arg.Contains("@") || arg.StartsWith("@") || arg.EndsWith("@")) { Fail = true; } }
+                                    if (Fail)
+                                    {
+                                        this.SourceLines++;
+                                        continue;
+                                    }
                                 } catch { continue; }
-                                row[2] = row[2].Trim(); //"Summary" argument
-                                row[3] = row[3].Trim(); //"Body" argument
-                                if (string.IsNullOrEmpty(row[4]) || !global::System.IO.File.Exists(row[4])) { row[4] = "NULL"; } else { row[4] = row[4].ToLower(); } //"Attachment 1" argument
-                                if (string.IsNullOrEmpty(row[5]) || !global::System.IO.File.Exists(row[5])) { row[4] = "NULL"; } else { row[4] = row[5].ToLower(); } //"Attachment 2" argument
-                                if (string.IsNullOrEmpty(row[6]) || !global::System.IO.File.Exists(row[6])) { row[4] = "NULL"; } else { row[6] = row[6].ToLower(); } //"Attachment 3" argument
-                                FilePath = "\"" + row[0] + "\"" + this.Separator + "\"" + row[1] + "\"" + this.Separator + "\"" + row[2] + "\"" + this.Separator + "\"" + row[3] + "\"" + this.Separator + "\"" + row[4] + "\"" + this.Separator + "\"" + row[5] + "\"" + this.Separator + "\"" + row[6] + "\"" + this.Separator;
+                                rec.Row[2] = rec.Row[2].Trim().Replace("\r", string.Empty).Replace("\n", "<br />"); //"Summary" argument
+                                rec.Row[3] = rec.Row[3].Trim().Replace("\r", string.Empty).Replace("\n", "<br />"); //"Body" argument
+                                if (string.IsNullOrEmpty(rec.Row[4]) || !global::System.IO.File.Exists(rec.Row[4])) { rec.Row[4] = "NULL"; } else { rec.Row[4] = rec.Row[4].ToLower(); } //"Attachment 1" argument
+                                if (string.IsNullOrEmpty(rec.Row[5]) || !global::System.IO.File.Exists(rec.Row[5])) { rec.Row[5] = "NULL"; } else { rec.Row[5] = rec.Row[5].ToLower(); } //"Attachment 2" argument
+                                FilePath = "\"" + rec.Row[0] + "\"" + this.Config.FileSeparator + "\"" + rec.Row[1] + "\"" + this.Config.FileSeparator + "\"" + rec.Row[2] + "\"" + this.Config.FileSeparator + "\"" + rec.Row[3] + "\"" + this.Config.FileSeparator + "\"" + rec.Row[4] + "\"" + this.Config.FileSeparator + "\"" + rec.Row[5] + "\"" + this.Config.FileSeparator;
+                                if (rec.Row.Length > 6)
+                                {
+                                    if (string.IsNullOrEmpty(rec.Row[6]) || !global::System.IO.File.Exists(rec.Row[6])) { rec.Row[4] = "NULL"; } else { rec.Row[6] = rec.Row[6].ToLower(); } //"Attachment 3" argument
+                                    FilePath += "\"" + rec.Row[6] + "\"";
+                                } else { FilePath += "\"NULL\""; }
                                 writer.WriteLine(FilePath);
                                 this.ValidLines++;
-                            }
-                            this.SourceLines++;
-                            FilePath = reader.ReadLine(); //REUSE
+                                this.SourceLines++;
+                            } else { this.SourceLines++; }
                         }
                     }
                     this.Owner = Caller;
@@ -1143,20 +1162,17 @@ namespace Dispatcher
             }
         }
 
-        private bool Send()
+        private bool Send(global::System.Collections.Generic.List<string> row)
         {
             try
             {
-                global::System.Collections.Generic.List<string> row = new global::System.Collections.Generic.List<string>(7);
-                global::Dispatcher.CSV.Tokenize(this.File.ReadLine(), this.Separator, new global::System.Text.StringBuilder(), row);
-                this.CurrentLine++;
                 global::System.Net.Mail.MailMessage MailToSend = new global::System.Net.Mail.MailMessage();
                 foreach (string arg in row[0].Split(new char[] { ';' }, global::System.StringSplitOptions.RemoveEmptyEntries)) { MailToSend.To.Add(arg); }
                 foreach (string arg in row[1].Split(new char[] { ';' }, global::System.StringSplitOptions.RemoveEmptyEntries)) { MailToSend.CC.Add(arg); }
                 MailToSend.Subject = row[2];
                 MailToSend.Body = row[3];
                 MailToSend.IsBodyHtml = true;
-                MailToSend.From = new global::System.Net.Mail.MailAddress(this.Mailer.SenderUser);
+                MailToSend.From = new global::System.Net.Mail.MailAddress(this.Config.SenderUser);
                 if (!string.IsNullOrEmpty(row[4]) && row[4] != "NULL") { MailToSend.Attachments.Add(new global::System.Net.Mail.Attachment(row[4])); }
                 if (!string.IsNullOrEmpty(row[5]) && row[5] != "NULL") { MailToSend.Attachments.Add(new global::System.Net.Mail.Attachment(row[5])); }
                 if (!string.IsNullOrEmpty(row[6]) && row[6] != "NULL") { MailToSend.Attachments.Add(new global::System.Net.Mail.Attachment(row[6])); }
@@ -1171,16 +1187,23 @@ namespace Dispatcher
             while (this.CurrentLine < this.ValidLines)
             {
                 if (this.AbortCalled) { break; }
-                else if (!this.Send())
-                {
-                    if (this.Owner == null) { global::Dispatcher.Notifier.ShowDialog("Erro ao Enviar Mensagem " + this.CurrentLine.ToString() + " de " + this.ValidLines.ToString(), "Erro", global::Dispatcher.Form.Type.ERROR); } else { this.Owner.Notify("Erro ao Enviar Mensagem " + this.CurrentLine.ToString() + " de " + this.ValidLines.ToString()); }
-                    break;
-                }
                 else
                 {
-                    global::System.Windows.Forms.Application.DoEvents();
-                    if (this.AbortCalled) { break; }
-                    global::System.Threading.Thread.Sleep(this.Mailer.SendInterval);
+                    global::System.Collections.Generic.List<string> row = new global::System.Collections.Generic.List<string>(7);
+                    global::Dispatcher.CSV.Tokenize(this.File.ReadLine(), this.Config.FileSeparator, new global::System.Text.StringBuilder(), row);
+                    this.CurrentLine++;
+                    if (!this.Send(row))
+                    {
+                        if (this.Owner == null) { global::Dispatcher.Notifier.ShowDialog("Erro ao Enviar Mensagem " + this.CurrentLine.ToString() + " de " + this.ValidLines.ToString(), "Erro", global::Dispatcher.Form.Type.ERROR); } else { this.Owner.Notify("Erro ao Enviar Mensagem " + this.CurrentLine.ToString() + " de " + this.ValidLines.ToString()); }
+                        break;
+                    }
+                    else
+                    {
+                        global::System.Windows.Forms.Application.DoEvents();
+                        if (this.AbortCalled) { break; }
+                        if (this.CurrentLine == this.ValidLines) { break; } else { global::System.Threading.Thread.Sleep(this.Config.SendInterval); }
+                    }
+                    row.Clear();
                 }
             }
             if (this.Owner != null) { this.Owner.Ended(); }
@@ -1194,37 +1217,30 @@ namespace Dispatcher
             else
             {
                 this.ThreadAbort();
-                this.Client = this.Mailer.NewClient();
+                this.Client = this.Config.NewClient();
                 this.Thread = new global::System.Threading.Thread(this.ExecuteJob);
                 this.Thread.IsBackground = true;
                 this.Thread.Start();
             }
         }
 
-        public Worker(char Separator, global::Dispatcher.Mailer Mailer)
-        {
-            this.Separator = Separator;
-            this.Mailer = Mailer;
-        }
-
-        public Worker(char Separator) : this(Separator, new global::Dispatcher.Mailer()) { /* NOTHING */ }
-        public Worker() : this(';') { /* NOTHING */ }
+        public Worker(global::Dispatcher.Config Config) { this.Config = Config; }
+        public Worker() : this(new global::Dispatcher.Config()) { /* NOTHING */ }
     }
 
     internal sealed class Program : global::Dispatcher.Container, global::Dispatcher.Worker.IOwner
     {
-        private static global::Dispatcher.Mailer mailer = null;
+        private static global::Dispatcher.Config config = null;
         private static global::Dispatcher.Worker worker = null;
         private global::System.Windows.Forms.Button openConfig;
         private global::System.Windows.Forms.TextBox csvPath;
-        private global::System.Windows.Forms.TextBox csvSep;
         private global::System.Windows.Forms.TextBox messages;
         private global::System.Windows.Forms.Button abortTask;
         private global::System.Windows.Forms.Button startTask;
         public event global::Dispatcher.Worker.WorkerHandler AbortWorker;
         private void OnAbort() { if (this.AbortWorker != null) { this.AbortWorker(global::Dispatcher.Program.worker); } }
         private void NotifyOut(string Message) { global::Dispatcher.Notifier.ShowDialog(Message, "Erro", global::Dispatcher.Form.Type.ERROR); }
-        void global::Dispatcher.Worker.IOwner.Notify(string Message) { if (global::Dispatcher.Program.worker == null || (global::Dispatcher.Program.worker.IsOpen && !global::Dispatcher.Program.worker.IsWorking)) { global::Dispatcher.Notifier.ShowDialog(Message, "Aviso", global::Dispatcher.Form.Type.INFO); } else { this.messages.Text = Message; } }
+        void global::Dispatcher.Worker.IOwner.Notify(string Message) { if (this.InvokeRequired) { this.Invoke(new global::Dispatcher.Worker.OnNotify((this as global::Dispatcher.Worker.IOwner).Notify), new object[] { Message }); } else if (global::Dispatcher.Program.worker == null || (global::Dispatcher.Program.worker.IsOpen && !global::Dispatcher.Program.worker.IsWorking)) { global::Dispatcher.Notifier.ShowDialog(Message, "Aviso", global::Dispatcher.Form.Type.INFO); } else { this.messages.Text = Message; } }
 
         private void EndWorker()
         {
@@ -1234,28 +1250,31 @@ namespace Dispatcher
 
         void global::Dispatcher.Worker.IOwner.Ended()
         {
-            if (global::Dispatcher.Program.worker != null)
+            if (this.InvokeRequired) { this.Invoke(new global::Dispatcher.Worker.OnEnd((this as global::Dispatcher.Worker.IOwner).Ended)); }
+            else
             {
-                this.messages.Text = "Feitos " + global::Dispatcher.Program.worker.CurrentLine.ToString() + " de " + global::Dispatcher.Program.worker.ValidLines.ToString() + " ao fim da Tarefa";
-                this.EndWorker();
+                if (global::Dispatcher.Program.worker != null)
+                {
+                    this.messages.Text = "Feitos " + global::Dispatcher.Program.worker.CurrentLine.ToString() + " de " + global::Dispatcher.Program.worker.ValidLines.ToString() + " ao fim da Tarefa";
+                    this.EndWorker();
+                }
+                this.abortTask.Enabled = false;
+                this.startTask.Enabled = true;
+                this.csvPath.ReadOnly = false;
             }
-            this.abortTask.Enabled = false;
-            this.startTask.Enabled = true;
-            this.csvPath.ReadOnly = false;
         }
 
         private void OnStart()
         {
             if (string.IsNullOrEmpty(this.csvPath.Text)) { this.NotifyOut("Campo com Caminho para o Arquivo CSV vazio!"); }
-            else if (string.IsNullOrEmpty(this.csvSep.Text)) { this.NotifyOut("Campo informando o Separador usado pelo Arquivo CSV vazio!"); }
             else
             {
-                if (global::Dispatcher.Program.mailer == null) { global::Dispatcher.Program.mailer = new global::Dispatcher.Mailer(); }
-                if (global::Dispatcher.Program.worker == null) { global::Dispatcher.Program.worker = new global::Dispatcher.Worker(this.csvSep.Text[0], global::Dispatcher.Program.mailer); }
+                if (global::Dispatcher.Program.config == null) { global::Dispatcher.Program.config = new global::Dispatcher.Config(); }
+                if (global::Dispatcher.Program.worker == null) { global::Dispatcher.Program.worker = new global::Dispatcher.Worker(global::Dispatcher.Program.config); }
                 global::Dispatcher.Program.worker.Open(this, this.csvPath.Text);
                 if (global::Dispatcher.Program.worker.IsOpen)
                 {
-                    if (global::System.Windows.Forms.DialogResult.Yes == global::Dispatcher.Notifier.ShowDialog("Confirma o início do Processo de envio?", "Confirmar", Type: global::Dispatcher.Form.Type.CONFIRM))
+                    if (global::System.Windows.Forms.DialogResult.Yes == global::Dispatcher.Notifier.ShowDialog("Confirma o início do Processo de envio? Serão necessários " + global::System.TimeSpan.FromMilliseconds((double)((long)global::Dispatcher.Program.config.SendInterval * (long)global::Dispatcher.Program.worker.ValidLines)).ToString() + " para concluir todos os envios.", "Confirmar", Type: global::Dispatcher.Form.Type.CONFIRM))
                     {
                         this.abortTask.Enabled = true;
                         this.startTask.Enabled = false;
@@ -1312,13 +1331,10 @@ namespace Dispatcher
             this.DragEnter += this.Form_DragEnter;
             this.DragDrop += this.Form_DragDrop;
             int Y = 32;
-            this.openConfig = this.InitButton("openConfig", 6, Y, "Configurações", true, Width: (global::Dispatcher.Form.StandardButtonWidth * 2), Height: global::Dispatcher.Form.StandardButtonHeight, Handler: new global::System.EventHandler((sender, e) => { if (global::Dispatcher.Program.mailer == null) { global::Dispatcher.Program.mailer = new global::Dispatcher.Mailer(true); } else { global::Dispatcher.Program.mailer.QueryUser(); } }));
+            this.openConfig = this.InitButton("openConfig", 6, Y, "Configurações", true, Width: (global::Dispatcher.Form.StandardButtonWidth * 2), Height: global::Dispatcher.Form.StandardButtonHeight, Handler: new global::System.EventHandler((sender, e) => { if (global::Dispatcher.Program.config == null) { global::Dispatcher.Program.config = new global::Dispatcher.Config(true); } else { global::Dispatcher.Program.config.QueryUser(); } }));
             Y += (global::Dispatcher.Form.StandardButtonHeight + 6);
             this.csvPath = this.InitField("csvPath", "Caminho para o Arquivo CSV", ref Y, false, LabelBackColor: default(global::System.Drawing.Color));
             this.csvPath.DoubleClick += (sender, e) => { this.PickFile(); };
-            this.csvSep = this.InitField("csvSep", "Separador das Colunas do Arquivo (CSV)", ref Y, false, LabelBackColor: default(global::System.Drawing.Color));
-            this.csvSep.MaxLength = 1;
-            this.csvSep.Text = ",";
             Y += (this.InitLabel("infoLabel", 6, Y, (this.Width - 12), 66, true, "O Arquivo deve ser no Formato CSV, representando as colunas na ordem: e-mail(s) do campo \"Para\" (se mais de 1, separado por \";\"), e-mail(s) do campo \"Cópia\" (se mais de 1, separado por \";\"), assunto do e-mail, corpo do e-mail, endereço do anexo (caminho completo para o arquivo) - se houver, e até 3 anexos (1 por coluna)", ForeColor: global::Dispatcher.Icons.Red, BackColor: this.BackColor).Height + 6);
             this.messages = this.InitField("messages", "Mensagens de Status", ref Y, true, LabelBackColor: default(global::System.Drawing.Color));
             this.messages.ReadOnly = true;

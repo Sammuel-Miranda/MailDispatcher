@@ -1179,7 +1179,12 @@ namespace Dispatcher
                 this.Client.Send(MailToSend);
                 try { if (this.Owner != null) { this.Owner.Notify("Processadas " + this.CurrentLine.ToString() + " de " + this.ValidLines.ToString()); } } catch { /* NOTHING */ }
                 return true;
-            } catch { return false; }
+            }
+            catch (global::System.Exception e)
+            {
+                try { if (this.Owner != null) { this.Owner.Notify("Erro em " + this.CurrentLine.ToString() + " por: " + e.Message); } } catch { /* NOTHING */ }
+                return false;
+            }
         }
 
         private void ExecuteJob()
@@ -1255,7 +1260,7 @@ namespace Dispatcher
             {
                 if (global::Dispatcher.Program.worker != null)
                 {
-                    this.messages.Text = "Feitos " + global::Dispatcher.Program.worker.CurrentLine.ToString() + " de " + global::Dispatcher.Program.worker.ValidLines.ToString() + " ao fim da Tarefa";
+                    this.messages.Text += global::System.Environment.NewLine + "Feitos " + global::Dispatcher.Program.worker.CurrentLine.ToString() + " de " + global::Dispatcher.Program.worker.ValidLines.ToString() + " ao fim da Tarefa";
                     this.EndWorker();
                 }
                 this.abortTask.Enabled = false;
